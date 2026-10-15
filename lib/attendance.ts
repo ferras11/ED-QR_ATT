@@ -1,3 +1,4 @@
+
 import { supabase } from './supabase';
 import { parseQRPayload } from './qr';
 import { getEventByCode } from './events';
@@ -36,31 +37,69 @@ export type TeacherEventSummary = {
   attendeeCount: number;
 };
 
+export type AdminAttendanceRecord = {
+  id: string;
+  eventId: string;
+  eventCode: string;
+  eventTitle: string;
+  studentId: string;
+  studentName: string | null;
+  teacherName: string | null;
+  scannedAt: string;
+};
+
+export type AdminDashboardStats = {
+  totalStudents: number;
+  totalTeachers: number;
+  totalEvents: number;
+  totalAttendance: number;
+};
+
+// Register a student's attendance using the scanned QR payload.
 export async function registerAttendance(
   rawPayload: string,
   studentId: string
 ): Promise<RegisterResult> {
   const parsed = parseQRPayload(rawPayload);
+
   if (!parsed.ok) {
-    return { success: false, message: parsed.message };
+    return {
+      success: false,
+      message: parsed.message,
+    };
   }
+
   const payload = parsed.payload;
-
   const now = Date.now();
-  const start = payload.start ? new Date(payload.start).getTime() : null;
-  const end = payload.end ? new Date(payload.end).getTime() : null;
 
-  if (start && now < start) {
-    return { success: false, message: 'Event has not started yet.' };
+  const start = payload.start
+    ? new Date(payload.start).getTime()
+    : null;
+
+  const end = payload.end
+    ? new Date(payload.end).getTime()
+    : null;
+
+  if (start !== null && now < start) {
+    return {
+      success: false,
+      message: 'Event has not started yet.',
+    };
   }
-  if (end && now > end) {
-    return { success: false, message: 'Event has already ended.' };
+
+  if (end !== null && now > end) {
+    return {
+      success: false,
+      message: 'Event has already ended.',
+    };
   }
 
   const title = payload.title ?? payload.event;
+
   let event: { id: string; title: string } | null = null;
 
   const foundEvent = await getEventByCode(payload.event);
+
   if (foundEvent) {
     event = foundEvent;
   } else {
@@ -76,33 +115,59 @@ export async function registerAttendance(
       ])
       .select('id, title')
       .single();
-    if (insertError) {
-      return { success: false, message: 'Could not create event.' };
+
+    if (insertError || !newEvent) {
+      console.error(
+        'Could not create attendance event:',
+        insertError
+      );
+
+      return {
+        success: false,
+        message: 'Could not create event.',
+      };
     }
+
     event = newEvent;
   }
 
-  const { error: attError } = await supabase.from('attendance').insert([
-    {
-      student_id: studentId,
-      event_id: event.id,
-    },
-  ]);
+  const { error: attendanceError } = await supabase
+    .from('attendance')
+    .insert([
+      {
+        student_id: studentId,
+        event_id: event.id,
+      },
+    ]);
 
-  if (attError) {
-    if (attError.code === '23505') {
+  if (attendanceError) {
+    if (attendanceError.code === '23505') {
       return {
         success: false,
         message: 'Already registered for this event.',
         eventTitle: event.title,
       };
     }
-    return { success: false, message: attError.message };
+
+    console.error(
+      'Could not register attendance:',
+      attendanceError
+    );
+
+    return {
+      success: false,
+      message: attendanceError.message,
+    };
   }
 
-  return { success: true, message: 'Attendance recorded!', eventTitle: event.title };
+  return {
+    success: true,
+    message: 'Attendance recorded!',
+    eventTitle: event.title,
+  };
 }
 
+// Get the attendance history of a specific student.
 export async function getAttendanceHistory(
   studentId: string
 ): Promise<AttendanceRecord[]> {
@@ -113,6 +178,13 @@ export async function getAttendanceHistory(
     .order('scanned_at', { ascending: false });
 
   if (error || !data) {
+    if (error) {
+      console.error(
+        'Unable to load student attendance history:',
+        error
+      );
+    }
+
     return [];
   }
 
@@ -124,6 +196,7 @@ export async function getAttendanceHistory(
   }));
 }
 
+// Get events created by a teacher and their attendees.
 export async function getTeacherEventAttendance(
   teacherId: string
 ): Promise<TeacherEventAttendance[]> {
@@ -133,57 +206,90 @@ export async function getTeacherEventAttendance(
     .eq('created_by', teacherId)
     .order('created_at', { ascending: false });
 
-  if (eventError || !events) return [];
-
-  const eventIds = events.map((e: any) => e.id);
-  if (eventIds.length === 0) return [];
-
-  const { data: attendance } = await supabase
-    .from('attendance')
-    .select('student_id, scanned_at, event_id')
-    .in('event_id', eventIds)
-    .order('scanned_at', { ascending: false });
-
-  const att = attendance ?? [];
-
-  // Fetch profiles for attendee names (uses RLS: Teachers can view profiles of their attendees)
-  const studentIds = [...new Set(att.map((a: any) => a.student_id as string))];
-  let profileMap: Record<string, string | null> = {};
-  if (studentIds.length > 0) {
-    const { data: profiles } = await supabase
-      .from('profiles')
-      .select('id, full_name')
-      .in('id', studentIds);
-    if (profiles) {
-      for (const p of profiles as any[]) {
-        profileMap[p.id] = p.full_name ?? null;
-      }
+  if (eventError || !events) {
+    if (eventError) {
+      console.error(
+        'Unable to load teacher events:',
+        eventError
+      );
     }
-    for (const a of att as any[]) {
-      if (a.profiles?.full_name && !profileMap[a.student_id]) {
-        profileMap[a.student_id] = a.profiles.full_name;
-      }
+
+    return [];
+  }
+
+  const eventIds = events.map((event: any) => event.id);
+
+  if (eventIds.length === 0) {
+    return [];
+  }
+
+  const { data: attendance, error: attendanceError } =
+    await supabase
+      .from('attendance')
+      .select('student_id, scanned_at, event_id')
+      .in('event_id', eventIds)
+      .order('scanned_at', { ascending: false });
+
+  if (attendanceError) {
+    console.error(
+      'Unable to load teacher event attendance:',
+      attendanceError
+    );
+  }
+
+  const attendanceRows = attendance ?? [];
+
+  const studentIds = [
+    ...new Set(
+      attendanceRows.map(
+        (record: any) => record.student_id as string
+      )
+    ),
+  ];
+
+  const profileMap: Record<string, string | null> = {};
+
+  if (studentIds.length > 0) {
+    const { data: profiles, error: profileError } =
+      await supabase
+        .from('profiles')
+        .select('id, full_name')
+        .in('id', studentIds);
+
+    if (profileError) {
+      console.error(
+        'Unable to load attendee profiles:',
+        profileError
+      );
+    }
+
+    for (const profile of profiles ?? []) {
+      profileMap[profile.id] = profile.full_name ?? null;
     }
   }
 
-  return events.map((e: any) => {
-    const rows = att.filter((a: any) => a.event_id === e.id);
+  return events.map((event: any) => {
+    const rows = attendanceRows.filter(
+      (record: any) => record.event_id === event.id
+    );
+
     return {
-      eventId: e.id,
-      eventCode: e.event_code,
-      title: e.title,
-      startTime: e.start_time,
-      endTime: e.end_time,
+      eventId: event.id,
+      eventCode: event.event_code,
+      title: event.title,
+      startTime: event.start_time,
+      endTime: event.end_time,
       attendeeCount: rows.length,
-      attendees: rows.map((a: any) => ({
-        studentId: a.student_id,
-        studentName: profileMap[a.student_id] ?? a.profiles?.full_name ?? null,
-        scannedAt: a.scanned_at,
+      attendees: rows.map((record: any) => ({
+        studentId: record.student_id,
+        studentName: profileMap[record.student_id] ?? null,
+        scannedAt: record.scanned_at,
       })),
     };
   });
 }
 
+// Get event summaries for a specific teacher.
 export async function getTeacherEventSummary(
   teacherId: string
 ): Promise<TeacherEventSummary[]> {
@@ -193,25 +299,195 @@ export async function getTeacherEventSummary(
     .eq('created_by', teacherId)
     .order('created_at', { ascending: false });
 
-  if (eventError || !events) return [];
+  if (eventError || !events) {
+    if (eventError) {
+      console.error(
+        'Unable to load teacher event summaries:',
+        eventError
+      );
+    }
 
-  const eventIds = events.map((e: any) => e.id);
-  if (eventIds.length === 0) return [];
+    return [];
+  }
 
-  const { data: attRows } = await supabase
-    .from('attendance')
-    .select('event_id')
-    .in('event_id', eventIds);
+  const eventIds = events.map((event: any) => event.id);
+
+  if (eventIds.length === 0) {
+    return [];
+  }
+
+  const { data: attendanceRows, error: attendanceError } =
+    await supabase
+      .from('attendance')
+      .select('event_id')
+      .in('event_id', eventIds);
+
+  if (attendanceError) {
+    console.error(
+      'Unable to load event attendance counts:',
+      attendanceError
+    );
+  }
 
   const counts: Record<string, number> = {};
-  (attRows ?? []).forEach((r: any) => {
-    counts[r.event_id] = (counts[r.event_id] ?? 0) + 1;
+
+  (attendanceRows ?? []).forEach((record: any) => {
+    counts[record.event_id] =
+      (counts[record.event_id] ?? 0) + 1;
   });
 
-  return events.map((e: any) => ({
-    eventId: e.id,
-    eventCode: e.event_code,
-    title: e.title,
-    attendeeCount: counts[e.id] ?? 0,
+  return events.map((event: any) => ({
+    eventId: event.id,
+    eventCode: event.event_code,
+    title: event.title,
+    attendeeCount: counts[event.id] ?? 0,
   }));
+}
+
+// Get all attendance records for the admin history screen.
+export async function getAdminAttendanceHistory(): Promise<
+  AdminAttendanceRecord[]
+> {
+  const { data, error } = await supabase
+    .from('attendance')
+    .select(`
+      id,
+      student_id,
+      scanned_at,
+      events (
+        id,
+        event_code,
+        title,
+        created_by
+      )
+    `)
+    .order('scanned_at', { ascending: false });
+
+  if (error) {
+    console.error(
+      'Unable to load admin attendance history:',
+      error
+    );
+    throw error;
+  }
+
+  const rows = data ?? [];
+
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const profileIds = [
+    ...new Set(
+      rows.flatMap((row: any) => {
+        const ids: string[] = [];
+
+        if (row.student_id) {
+          ids.push(row.student_id);
+        }
+
+        const event = Array.isArray(row.events)
+          ? row.events[0]
+          : row.events;
+
+        if (event?.created_by) {
+          ids.push(event.created_by);
+        }
+
+        return ids;
+      })
+    ),
+  ];
+
+  const profileMap: Record<string, string | null> = {};
+
+  if (profileIds.length > 0) {
+    const { data: profiles, error: profileError } =
+      await supabase
+        .from('profiles')
+        .select('id, full_name')
+        .in('id', profileIds);
+
+    if (profileError) {
+      console.error(
+        'Unable to load admin history profile names:',
+        profileError
+      );
+      throw profileError;
+    }
+
+    for (const profile of profiles ?? []) {
+      profileMap[profile.id] = profile.full_name ?? null;
+    }
+  }
+
+  return rows.map((row: any) => {
+    const event = Array.isArray(row.events)
+      ? row.events[0]
+      : row.events;
+
+    return {
+      id: row.id,
+      // Database UUID used for filtering.
+      eventId: event?.id ?? '',
+      // Human-readable event code used for display/search.
+      eventCode: event?.event_code ?? '',
+      eventTitle: event?.title ?? 'Unknown Event',
+      studentId: row.student_id,
+      studentName: profileMap[row.student_id] ?? null,
+      teacherName: event?.created_by
+        ? profileMap[event.created_by] ?? null
+        : null,
+      scannedAt: row.scanned_at,
+    };
+  });
+}
+
+// Get live totals for the admin dashboard.
+export async function getAdminDashboardStats(): Promise<AdminDashboardStats> {
+  const [
+    studentsResult,
+    teachersResult,
+    eventsResult,
+    attendanceResult,
+  ] = await Promise.all([
+    supabase
+      .from('profiles')
+      .select('id', { count: 'exact', head: true })
+      .eq('role', 'student'),
+
+    supabase
+      .from('profiles')
+      .select('id', { count: 'exact', head: true })
+      .eq('role', 'teacher'),
+
+    supabase
+      .from('events')
+      .select('id', { count: 'exact', head: true }),
+
+    supabase
+      .from('attendance')
+      .select('id', { count: 'exact', head: true }),
+  ]);
+
+  const error =
+    studentsResult.error ??
+    teachersResult.error ??
+    eventsResult.error ??
+    attendanceResult.error;
+
+  if (error) {
+    console.error(
+      'Unable to load admin dashboard stats:',
+      error
+    );
+    throw error;
+  }
+
+  return {
+    totalStudents: studentsResult.count ?? 0,
+    totalTeachers: teachersResult.count ?? 0,
+    totalEvents: eventsResult.count ?? 0,
+    totalAttendance: attendanceResult.count ?? 0,
+  };
 }

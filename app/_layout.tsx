@@ -1,5 +1,11 @@
+
 import { Redirect, Stack, useSegments } from 'expo-router';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import {
+  ActivityIndicator,
+  StyleSheet,
+  View,
+  Text,
+} from 'react-native';
 
 import { COLORS } from '@/constants/colors';
 import { useAuth } from '@/lib/auth';
@@ -12,6 +18,7 @@ export default function RootLayout() {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={COLORS.primary} />
+        <Text style={styles.loadingText}>Loading your account...</Text>
       </View>
     );
   }
@@ -43,5 +50,10 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  loadingText: {
+    marginTop: 12,
+    color: COLORS.primary,
+    fontSize: 14,
   },
 });

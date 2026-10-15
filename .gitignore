@@ -1,4 +1,3 @@
-
 # dependencies
 node_modules/
 
@@ -21,3 +20,8 @@ expo-env.d.ts
 
 # teaching materials
 docs/
+
+# environment variables
+.env
+.env.*
+!.env.example
